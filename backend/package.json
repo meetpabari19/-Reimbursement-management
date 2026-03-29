@@ -1,21 +1,15 @@
 {
-  "name": "reimbursex-backend",
+  "name": "backend",
   "version": "1.0.0",
-  "private": true,
-  "type": "module",
+  "description": "",
+  "main": "index.js",
   "scripts": {
-    "dev": "nodemon --exec \"node --dns-result-order=verbatim\" src/server.js",
-    "start": "node --dns-result-order=verbatim src/server.js"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
-    "bcryptjs": "^2.4.3",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.2",
-    "jsonwebtoken": "^9.0.2",
-    "pg": "^8.13.1"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.10"
+    "postgres": "^3.4.8"
   }
 }

@@ -1,0 +1,10 @@
+@import './fonts.css';
+@import './tailwind.css';
+@import './theme.css';
+
+/* OCR upload zone scan animation */
+@keyframes scan {
+  0%   { top: 0; }
+  100% { top: 100%; }
+}
+
