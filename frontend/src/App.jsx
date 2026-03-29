@@ -16,6 +16,8 @@ import {
 } from "./data/mockData"
 import "./App.css"
 
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8081/api"
+
 function App() {
   const [authMode, setAuthMode] = useState("login")
   const [authForm, setAuthForm] = useState({
@@ -31,7 +33,10 @@ function App() {
   const [users, setUsers] = useState(initialUsers)
   const [expenses, setExpenses] = useState(initialExpenses)
   const [approvalRules, setApprovalRules] = useState(initialApprovalRules)
+  const [managerExpenses, setManagerExpenses] = useState([])
+  const [managerRules, setManagerRules] = useState(initialApprovalRules)
   const [currentUserId, setCurrentUserId] = useState(null)
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem("authToken") || "")
 
   const [countries, setCountries] = useState([])
   const [loadingCountries, setLoadingCountries] = useState(true)
@@ -110,69 +115,105 @@ function App() {
     })
   }
 
-  const handleSignup = () => {
+  const upsertUser = (user) => {
+    setUsers((prev) => {
+      const existingIndex = prev.findIndex((item) => String(item.id) === String(user.id))
+      if (existingIndex === -1) {
+        return [...prev, user]
+      }
+
+      const next = [...prev]
+      next[existingIndex] = { ...next[existingIndex], ...user }
+      return next
+    })
+  }
+
+  const handleSignup = async () => {
     if (!authForm.email || !authForm.password || !authForm.name) {
       setAuthMessage("Fill all required signup fields.")
       return
     }
 
-    if (!company.created && authForm.role !== "admin") {
-      setAuthMessage("Admin signup is required first to create company.")
-      return
-    }
+    try {
+      const response = await fetch(`${API_BASE}/auth/signup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: authForm.name,
+          email: authForm.email,
+          password: authForm.password,
+          role: authForm.role,
+        }),
+      })
 
-    if (users.some((item) => item.email.toLowerCase() === authForm.email.toLowerCase())) {
-      setAuthMessage("Account with this email already exists.")
-      return
-    }
-
-    let nextCompany = company
-    if (!company.created) {
-      const selected = countries.find((item) => item.country === authForm.country)
-      if (!selected) {
-        setAuthMessage("Select country for company creation.")
+      const payload = await response.json()
+      if (!response.ok) {
+        const rawMessage = payload.message || "Signup failed."
+        if (rawMessage.toLowerCase().includes("database connection failed")) {
+          setAuthMessage("Backend DB URL is invalid. Copy exact Transaction pooler URL from Supabase Connect and paste in backend/.env DATABASE_URL.")
+          return
+        }
+        setAuthMessage(rawMessage)
         return
       }
 
-      nextCompany = {
-        created: true,
-        name: "ReimburseX Labs",
-        country: selected.country,
-        currencyCode: selected.currencyCode,
-        currencySymbol: selected.currencySymbol,
+      const nextUser = {
+        ...payload.user,
+        department: payload.user.role,
       }
-      setCompany(nextCompany)
-    }
 
-    const newUser = {
-      id: `USR-${Date.now()}`,
-      name: authForm.name,
-      email: authForm.email,
-      password: authForm.password,
-      role: authForm.role,
-      department: authForm.role,
+      upsertUser(nextUser)
+      setCurrentUserId(nextUser.id)
+      setAuthToken(payload.token)
+      localStorage.setItem("authToken", payload.token)
+      setAuthMessage("")
+      clearAuthForm()
+    } catch {
+      setAuthMessage("Cannot reach backend auth service.")
     }
-
-    setUsers((prev) => [...prev, newUser])
-    setCurrentUserId(newUser.id)
-    setAuthMessage("")
-    clearAuthForm()
   }
 
-  const handleLogin = () => {
-    const user = users.find(
-      (item) =>
-        item.email.toLowerCase() === authForm.email.toLowerCase() && item.password === authForm.password,
-    )
-
-    if (!user) {
-      setAuthMessage("Invalid login credentials.")
+  const handleLogin = async () => {
+    if (!authForm.email || !authForm.password) {
+      setAuthMessage("Email and password are required.")
       return
     }
 
-    setCurrentUserId(user.id)
-    setAuthMessage("")
-    clearAuthForm()
+    try {
+      const response = await fetch(`${API_BASE}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: authForm.email,
+          password: authForm.password,
+        }),
+      })
+
+      const payload = await response.json()
+      if (!response.ok) {
+        const rawMessage = payload.message || "Invalid login credentials."
+        if (rawMessage.toLowerCase().includes("database connection failed")) {
+          setAuthMessage("Backend DB URL is invalid. Copy exact Transaction pooler URL from Supabase Connect and paste in backend/.env DATABASE_URL.")
+          return
+        }
+        setAuthMessage(rawMessage)
+        return
+      }
+
+      const nextUser = {
+        ...payload.user,
+        department: payload.user.role,
+      }
+
+      upsertUser(nextUser)
+      setCurrentUserId(nextUser.id)
+      setAuthToken(payload.token)
+      localStorage.setItem("authToken", payload.token)
+      setAuthMessage("")
+      clearAuthForm()
+    } catch {
+      setAuthMessage("Cannot reach backend auth service.")
+    }
   }
 
   const handleAuthSubmit = (event) => {
@@ -206,31 +247,145 @@ function App() {
     setExpenses((prev) => prev.map((item) => (item.id === expenseId ? { ...item, status } : item)))
   }
 
-  const handleManagerAction = (expenseId, status) => {
-    setExpenses((prev) => prev.map((item) => (item.id === expenseId ? { ...item, status } : item)))
+  const fetchManagerDashboardData = async (token) => {
+    const headers = {
+      Authorization: `Bearer ${token}`,
+    }
+
+    const [expensesResponse, rulesResponse] = await Promise.all([
+      fetch(`${API_BASE}/expenses?page=1&pageSize=500`, { headers }),
+      fetch(`${API_BASE}/manager/rules`, { headers }),
+    ])
+
+    if (!expensesResponse.ok) {
+      throw new Error("Failed to load manager expenses")
+    }
+
+    const expensesPayload = await expensesResponse.json()
+    const nextExpenses = Array.isArray(expensesPayload.data) ? expensesPayload.data : []
+    setManagerExpenses(nextExpenses)
+
+    if (rulesResponse.ok) {
+      const rulesPayload = await rulesResponse.json()
+      setManagerRules({
+        escalateAfterDays: Number(rulesPayload.escalateAfterDays || 3),
+        minApprovals: Number(rulesPayload.minApprovals || 1),
+      })
+    }
+
+    return nextExpenses
   }
 
-  const handleSubmitExpense = (payload) => {
-    if (!currentUser) {
+  useEffect(() => {
+    if (!currentUser || !authToken) {
       return
     }
 
-    const newExpense = {
-      id: `EXP-${Date.now()}`,
-      employeeId: currentUser.id,
-      employeeName: currentUser.name,
-      managerId: "USR-002",
-      category: payload.category,
-      description: payload.description,
-      amountUsd: payload.amountUsd,
-      status: "pending",
-      submittedAt: new Date().toISOString().slice(0, 10),
+    if (currentUser.role === "employee") {
+      fetch(`${API_BASE}/expenses?page=1&pageSize=500`, {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      })
+        .then(async (response) => {
+          const payload = await response.json()
+          if (!response.ok) {
+            throw new Error(payload.message || "Failed to load expenses")
+          }
+          const rows = Array.isArray(payload.data) ? payload.data : []
+          setExpenses(rows)
+        })
+        .catch(() => {
+          setAuthMessage("Unable to load your expenses from backend.")
+        })
+      return
     }
 
-    setExpenses((prev) => [newExpense, ...prev])
+    fetchManagerDashboardData(authToken)
+      .then((items) => {
+        if (currentUser.role === "admin") {
+          setExpenses(items)
+        }
+      })
+      .catch(() => {
+        setAuthMessage("Unable to load expense data from backend.")
+      })
+  }, [currentUser, authToken])
+
+  const handleManagerAction = async (expenseId, status) => {
+    if (!authToken) {
+      return
+    }
+
+    try {
+      const response = await fetch(`${API_BASE}/manager/expenses/${expenseId}/status`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ status }),
+      })
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        throw new Error(payload.message || "Failed to update expense")
+      }
+
+      await fetchManagerDashboardData(authToken)
+    } catch (error) {
+      setAuthMessage(error.message || "Failed to update expense status. Please retry.")
+      await fetchManagerDashboardData(authToken).catch(() => {})
+    }
+  }
+
+  const handleSubmitExpense = (payload) => {
+    if (!currentUser || !authToken) {
+      return
+    }
+
+    fetch(`${API_BASE}/expenses`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        employeeId: currentUser.id,
+        description: payload.description,
+        category: payload.category,
+        amountUsd: payload.amountUsd,
+      }),
+    })
+      .then(async (response) => {
+        const data = await response.json()
+        if (!response.ok) {
+          throw new Error(data.message || "Failed to submit expense")
+        }
+
+        const newExpense = {
+          id: data.id,
+          employeeId: data.employee_id,
+          employeeName: data.employee_name || currentUser.name,
+          category: data.category,
+          description: data.description,
+          amountUsd: Number(data.amount_usd || payload.amountUsd),
+          status: data.status,
+          submittedAt: data.submitted_at,
+        }
+
+        setExpenses((prev) => [newExpense, ...prev])
+      })
+      .catch(() => {
+        setAuthMessage("Expense submit failed. Please retry.")
+      })
   }
 
   const handleLogout = () => {
+    localStorage.removeItem("authToken")
+    setAuthToken("")
+    setManagerExpenses([])
+    setManagerRules(initialApprovalRules)
     setCurrentUserId(null)
     setAuthMode("login")
   }
@@ -273,8 +428,8 @@ function App() {
       <ManagerDashboard
         user={currentUser}
         company={company}
-        expenses={expenses.filter((item) => item.employeeId !== currentUser.id)}
-        approvalRules={approvalRules}
+        expenses={managerExpenses}
+        approvalRules={managerRules}
         formatMoney={formatMoney}
         onManagerAction={handleManagerAction}
         onLogout={handleLogout}
