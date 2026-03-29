@@ -11,9 +11,9 @@ import {
 import {
   initialCompany,
   initialUsers,
-  initialExpenses,
   initialApprovalRules,
 } from "./data/mockData"
+import { supabase } from "./utils/supabase"
 import "./App.css"
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8081/api"
@@ -31,7 +31,8 @@ function App() {
 
   const [company, setCompany] = useState(initialCompany)
   const [users, setUsers] = useState(initialUsers)
-  const [expenses, setExpenses] = useState(initialExpenses)
+  const [directoryUsers, setDirectoryUsers] = useState([])
+  const [expenses, setExpenses] = useState([])
   const [approvalRules, setApprovalRules] = useState(initialApprovalRules)
   const [managerExpenses, setManagerExpenses] = useState([])
   const [managerRules, setManagerRules] = useState(initialApprovalRules)
@@ -41,6 +42,99 @@ function App() {
   const [countries, setCountries] = useState([])
   const [loadingCountries, setLoadingCountries] = useState(true)
   const [rates, setRates] = useState({ USD: 1 })
+
+  const isUuid = (value) =>
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+
+  const fetchUsersFromDb = async () => {
+    const { data, error } = await supabase
+      .from("users")
+      .select("id, name, email, role, department, manager_id, is_active")
+      .order("name", { ascending: true })
+
+    if (error) {
+      throw error
+    }
+
+    return (data || []).map((row) => ({
+      id: row.id,
+      name: row.name || "Unknown",
+      email: row.email || "",
+      role: row.role || "employee",
+      department: row.department || row.role || "employee",
+      managerId: row.manager_id || null,
+      isActive: row.is_active,
+    }))
+  }
+
+  const fetchExpensesFromDb = async () => {
+    const [
+      { data: expenseRows, error: expenseError },
+      { data: userRows, error: userError },
+      { data: managerLogRows, error: managerLogError },
+    ] =
+      await Promise.all([
+        supabase
+          .from("expenses")
+          .select("id, employee_id, category, description, amount, amount_usd, status, submitted_at")
+          .order("submitted_at", { ascending: false }),
+        supabase.from("users").select("id, name, manager_id"),
+        supabase
+          .from("expense_request_logs")
+          .select("expense_id, actor_role, event_type, status_after, created_at")
+          .order("created_at", { ascending: false }),
+      ])
+
+    if (expenseError) {
+      throw expenseError
+    }
+
+    if (userError) {
+      console.warn("Could not load users for expense names:", userError.message)
+    }
+
+    if (managerLogError) {
+      console.warn("Could not load manager request logs:", managerLogError.message)
+    }
+
+    const userMap = new Map((userRows || []).map((row) => [row.id, row]))
+    const latestManagerLogByExpense = new Map()
+    ;(managerLogRows || [])
+      .filter((row) => {
+        const role = (row.actor_role || "").trim().toLowerCase()
+        const eventType = (row.event_type || "").trim().toLowerCase()
+        return role === "manager" && eventType === "status_changed"
+      })
+      .forEach((row) => {
+      if (!latestManagerLogByExpense.has(row.expense_id)) {
+        latestManagerLogByExpense.set(row.expense_id, row)
+      }
+      })
+
+    return (expenseRows || []).map((exp) => {
+      const managerLog = latestManagerLogByExpense.get(exp.id)
+      const managerDecision = managerLog?.status_after || null
+      const employee = userMap.get(exp.employee_id)
+      const cleanedEmployeeName =
+        (employee?.name || "Unknown Employee").replace(/\s*\([^)]*\)\s*/g, " ").trim() ||
+        "Unknown Employee"
+
+      return {
+        id: exp.id,
+        employeeId: exp.employee_id,
+        employeeName: cleanedEmployeeName,
+        managerId: employee?.manager_id || null,
+        category: exp.category || "Other",
+        description: exp.description || "",
+        amountUsd: Number(exp.amount_usd ?? exp.amount ?? 0),
+        status: exp.status,
+        submittedAt: exp.submitted_at,
+        managerDecision,
+        managerDecisionAt: managerLog?.created_at || null,
+      }
+    })
+  }
 
   useEffect(() => {
     let mounted = true
@@ -91,6 +185,58 @@ function App() {
       mounted = false
     }
   }, [])
+
+  useEffect(() => {
+    let mounted = true
+
+    async function loadUsers() {
+      try {
+        const dbUsers = await fetchUsersFromDb()
+        if (mounted) {
+          setDirectoryUsers(dbUsers)
+        }
+      } catch (error) {
+        console.error("Failed to load users from DB:", error.message || error)
+        if (mounted) {
+          setDirectoryUsers([])
+        }
+        window.alert(`Could not load users table: ${error.message || error}`)
+      }
+    }
+
+    loadUsers()
+
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  useEffect(() => {
+    let mounted = true
+
+    async function loadExpenses() {
+      try {
+        const formattedExpenses = await fetchExpensesFromDb()
+        if (mounted) {
+          setExpenses(formattedExpenses)
+        }
+      } catch (error) {
+        console.error("Failed to load expenses from DB:", error.message || error)
+        if (mounted) {
+          setExpenses([])
+        }
+      }
+    }
+
+    loadExpenses()
+
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+
+
 
   const currentUser = useMemo(
     () => users.find((item) => item.id === currentUserId) || null,
@@ -171,6 +317,12 @@ function App() {
     } catch {
       setAuthMessage("Cannot reach backend auth service.")
     }
+
+    setUsers((prev) => [...prev, newUser])
+    setDirectoryUsers((prev) => [...prev, newUser])
+    setCurrentUserId(newUser.id)
+    setAuthMessage("")
+    clearAuthForm()
   }
 
   const handleLogin = async () => {
@@ -225,7 +377,31 @@ function App() {
     handleLogin()
   }
 
-  const handleRoleChange = (userId, role) => {
+  const handleRoleChange = async (userId, role) => {
+    if (isUuid(userId)) {
+      const { error } = await supabase
+        .from("users")
+        .update({ role, department: role })
+        .eq("id", userId)
+
+      if (error) {
+        window.alert(`Could not update user role: ${error.message}`)
+        return
+      }
+    }
+
+    setDirectoryUsers((prev) =>
+      prev.map((item) =>
+        item.id === userId
+          ? {
+              ...item,
+              role,
+              department: role,
+            }
+          : item,
+      ),
+    )
+
     setUsers((prev) =>
       prev.map((item) =>
         item.id === userId
@@ -243,10 +419,157 @@ function App() {
     setApprovalRules((prev) => ({ ...prev, [key]: Math.max(1, value || 1) }))
   }
 
-  const handleOverrideStatus = (expenseId, status) => {
-    setExpenses((prev) => prev.map((item) => (item.id === expenseId ? { ...item, status } : item)))
+  const handleOverrideStatus = async (expenseId, status) => {
+    if (!currentUser) return
+
+    if (!isUuid(expenseId)) {
+      window.alert("This row is not a DB expense (invalid UUID). Please refresh and use DB-loaded rows.")
+      return
+    }
+
+    try {
+      const actionMap = {
+        approved: "approved",
+        rejected: "rejected",
+        escalated: "escalated",
+      }
+      const action = actionMap[status]
+      if (!action) {
+        console.error("Invalid status action:", status)
+        return
+      }
+
+      const approverId = isUuid(currentUser.id) ? currentUser.id : null
+      const targetExpense = expenses.find((item) => item.id === expenseId)
+      const normalizedExpenseStatus = status === "approved" || status === "rejected" ? status : "pending"
+
+      const { error: approvalInsertError } = await supabase.from("expense_approvals").insert({
+        expense_id: expenseId,
+        approver_id: approverId,
+        action,
+        step_order: 1,
+        comment: `Approval action: ${action}`,
+      })
+      if (approvalInsertError) {
+        console.error("Failed to insert expense approval:", approvalInsertError.message)
+        window.alert(`Could not write to expense_approvals: ${approvalInsertError.message}`)
+        return
+      }
+
+      const { error: requestLogError } = await supabase.from("expense_request_logs").insert({
+        expense_id: expenseId,
+        actor_user_id: approverId,
+        actor_role: "admin",
+        event_type: "status_changed",
+        status_before: targetExpense?.status || null,
+        status_after: status,
+        source: "admin-dashboard",
+        payload: {
+          category: targetExpense?.category || null,
+          description: targetExpense?.description || null,
+        },
+      })
+      if (requestLogError) {
+        console.error("Failed to write admin request log:", requestLogError.message)
+        window.alert(`Could not write to expense_request_logs: ${requestLogError.message}`)
+        return
+      }
+
+      const { error: expenseUpdateError } = await supabase
+        .from("expenses")
+        .update({ status: normalizedExpenseStatus })
+        .eq("id", expenseId)
+      if (expenseUpdateError) {
+        console.error("Failed to update expense status:", expenseUpdateError.message)
+        window.alert(`Could not update expense status: ${expenseUpdateError.message}`)
+        return
+      }
+
+      const refreshedExpenses = await fetchExpensesFromDb()
+      setExpenses(refreshedExpenses)
+    } catch (error) {
+      console.error("Error updating expense status:", error)
+    }
   }
 
+  const handleManagerAction = async (expenseId, status) => {
+    if (!currentUser) return
+
+    if (!isUuid(expenseId)) {
+      window.alert("This row is not a DB expense (invalid UUID). Please refresh and use DB-loaded rows.")
+      return
+    }
+
+    const targetExpense = expenses.find((item) => item.id === expenseId)
+    const actorUserId = isUuid(currentUser.id) ? currentUser.id : null
+    const normalizedExpenseStatus = status === "approved" || status === "rejected" ? status : "pending"
+
+    try {
+      const { error: managerLogError } = await supabase.from("expense_request_logs").insert({
+        expense_id: expenseId,
+        actor_user_id: actorUserId,
+        actor_role: "manager",
+        event_type: "status_changed",
+        status_before: targetExpense?.status || null,
+        status_after: status,
+        source: "manager-dashboard",
+        payload: {
+          category: targetExpense?.category || null,
+          description: targetExpense?.description || null,
+        },
+      })
+      if (managerLogError) {
+        console.error("Failed to write manager request log:", managerLogError.message)
+        window.alert(`Could not write to expense_request_logs: ${managerLogError.message}`)
+        return
+      }
+
+      const { error: expenseUpdateError } = await supabase
+        .from("expenses")
+        .update({ status: normalizedExpenseStatus })
+        .eq("id", expenseId)
+      if (expenseUpdateError) {
+        console.error("Failed to update expense status from manager action:", expenseUpdateError.message)
+        window.alert(`Could not update expense status: ${expenseUpdateError.message}`)
+        return
+      }
+
+      const refreshedExpenses = await fetchExpensesFromDb()
+      setExpenses(refreshedExpenses)
+    } catch (error) {
+      console.error("Error applying manager action:", error)
+      window.alert("Manager action failed. Check console for details.")
+    }
+  }
+
+  const handleSubmitExpense = async (payload) => {
+    if (!currentUser) {
+      return
+    }
+
+    if (!isUuid(currentUser.id)) {
+      window.alert("Employee submission requires DB-authenticated user id (UUID).")
+      return
+    }
+
+    const { error: insertError } = await supabase.from("expenses").insert({
+      employee_id: currentUser.id,
+      category: payload.category,
+      description: payload.description,
+      amount: Number(payload.amountUsd),
+      amount_usd: Number(payload.amountUsd),
+      currency_code: "USD",
+      date: new Date().toISOString().slice(0, 10),
+      status: "pending",
+    })
+
+    if (insertError) {
+      window.alert(`Could not submit expense: ${insertError.message}`)
+      return
+    }
+
+    const refreshedExpenses = await fetchExpensesFromDb()
+    setExpenses(refreshedExpenses)
   const fetchManagerDashboardData = async (token) => {
     const headers = {
       Authorization: `Bearer ${token}`,
@@ -411,7 +734,7 @@ function App() {
       <AdminDashboard
         user={currentUser}
         company={company}
-        users={users}
+        users={directoryUsers}
         expenses={expenses}
         approvalRules={approvalRules}
         formatMoney={formatMoney}
@@ -424,11 +747,16 @@ function App() {
   }
 
   if (currentUser.role === "manager") {
+    const managerExpenses = isUuid(currentUser.id)
+      ? expenses.filter((item) => item.managerId === currentUser.id)
+      : expenses.filter((item) => item.employeeId !== currentUser.id)
+
     return (
       <ManagerDashboard
         user={currentUser}
         company={company}
         expenses={managerExpenses}
+        approvalRules={approvalRules}
         approvalRules={managerRules}
         formatMoney={formatMoney}
         onManagerAction={handleManagerAction}
