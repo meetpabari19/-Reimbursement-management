@@ -121,7 +121,7 @@ function AuthPage({
         </form>
 
         {message ? <p className="message">{message}</p> : null}
-        {companyReady ? <p className="status">Company profile is active.</p> : <p className="status warn">Company not created yet. Admin signup required.</p>}
+        {companyReady ? <p className="status">UI company profile is loaded.</p> : <p className="status warn">Company not created yet. Admin signup required.</p>}
       </section>
     </div>
   )
